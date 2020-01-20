@@ -3,14 +3,14 @@
 import sys
 import os
 import time
-import re
 from os import path as osp
 
 import cv
+import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 import crowd
+import crowdio
 import draw
 import crowdmisc
 
@@ -19,19 +19,17 @@ import crowdmisc
 
 newPoint = None
 
-densityWindowSize = (480, 320)
-stateWindowSize = (800, 300)
-statisticWindowSize = (600, 400)
-configImageZoom=0.5
+densityWindowSize = (320, 480)
+stateWindowSize = (300, 800)
+statisticWindowSize = (400, 600)
+# TODO:  Make this a function of the image size, and later on factor out
+# to the GUI
+configImageZoom=1
 
-sourceDir = "./images"
-recycleDir = "./recycled"
-statFileName = "./result.png"
 
-# Yakimanka Feb 4
-# pattern = re.compile("^im_\d{10}_\d{3}.jpg$")
-# Jun 12, Rozhdestvensky Blvd
-pattern = re.compile("^DSC_\d{4}.JPG$")
+#sourceDir = "./images"
+#recycleDir = "./recycled"
+#statFileName = "./result.png"
 
 ###############################################################################
 ## the mouse callback for 'Configure' window
@@ -46,31 +44,6 @@ if camera is None:
     print "Camera off"
     sys.exit(1)
 
-def getFileTime(filename):
-    return float(filename[4:8])# + float(filename[14:17])/1000
-
-def getNextFrame(previousFrameTime):
-    fileTime = 0
-    image = None
-    fileList = os.listdir(sourceDir)
-    fileList.sort()
-
-    # pattern now in global
-    fileName = ""
-    for fileName in fileList:
-        if pattern.match(fileName):
-            fileTime = getFileTime(fileName)
-            if fileTime > previousFrameTime:
-                filePath=osp.join(sourceDir, fileName)
-                #print "File Time: %d", (fileTime)
-                try:
-                    image = cv.LoadImageM(filePath, cv.CV_LOAD_IMAGE_GRAYSCALE)
-                except IOError: 
-                    print "Can't read ", filePath
-                    continue
-                break
-    return image, fileTime, len(fileList), fileName
-
 #gray_frame = None
 #def getNextFrame(previousFrameTime):
 #    global gray_frame
@@ -81,30 +54,11 @@ def getNextFrame(previousFrameTime):
 #    return gray_frame, time.time(), 0
 
 
-# Marks frames (handled) before beforeTime
-def markFrames(beforeTime):
-    fileList = os.listdir(sourceDir)
-    fileList.sort()
-    #pattern = re.compile("^im_\d{10}_\d{3}.jpg$")
-    for fileName in fileList:
-        if pattern.match(fileName):
-            fileTime = getFileTime(fileName)
-            if fileTime <= previousFrameTime:
-                os.rename(osp.join(sourceDir, fileName),
-                          osp.join(recycleDir + fileName))
-            else:
-                break
-            
-def drawStreetRegion(DestImage, StreetImage):
-    #cv.SetImageROI(DestImage, (DestImage.width/4, 0, 3*DestImage.width/4, DestImage.height))
-    cv.Resize(StreetImage, DestImage)
-    #cv.ResetImageROI(DestImage)
-
 def saveStatImage(image, time):
     try:
         saveFileName = "%s_%d.jpg" % (statFileName, int(time))
         print saveFileName
-        cv.SaveImage('tempstat.jpg', image)
+        cv2.imwrite('tempstat.jpg', image)
         os.rename('tempstat.jpg', saveFileName)
     except IOError: 
         print "Can't save ", saveFileName
@@ -144,8 +98,8 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
     global newPoint, previousFrameTime
         
     # Algorithm parameters
-    sampleRectDims = crowdmisc.sample_rect_dims
-
+    sampleRectDims = crowdmisc.Properties.sample_rect_dims
+    egomotion_correction = crowdmisc.Properties.egomotion_correction
 
     # Variables
     processMode = "pause"
@@ -159,6 +113,7 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
     crowdDensity = 0.
     numPeopleInSample = 0
     currPeopleCount = 0
+    velocities = []
 
     peoplePerStreetRegStr = ""
 
@@ -166,9 +121,13 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
 
     rgbFrame = None
 
+    #TODO:  Remove all references to currentFrame and previusFrame in favor
+    # of the versions that memoize things about the image.
     currentFrame = None
     previousFrame = None
-
+    currentTrackedFrame = None
+    previousTrackedFrame = None
+    
     firstFrameTime = 0
     currentFrameTime = 0
     previousFrameTime = 0
@@ -181,14 +140,16 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
     configWindowImage = None
 
     densityWindow='Density'
-    densityWindowImage = cv.CreateImage(densityWindowSize, 8, 3)
+    densityWindowImage = np.zeros(densityWindowSize+(3,),
+                                  dtype = np.uint8)
 
     stateWindow='State'
-    stateWindowImage = cv.CreateImage(stateWindowSize, 8, 3)
+    stateWindowImage = np.zeros(stateWindowSize+(3,),
+                                dtype = np.uint8)
 
     statisticWindow='Statistic'
-    statisticWindowImage = cv.CreateImage(statisticWindowSize, 8, 3)
-
+    statisticWindowImage = np.zeros(statisticWindowSize+tuple([3]),
+                                    dtype = np.uint8)
     cv.NamedWindow(configWindow)
     cv.SetMouseCallback(configWindow, on_mouse)
     
@@ -202,14 +163,17 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
     firstFrameTime, previousFrameTime, currPeopleCount = restoreState()
 
     # Take one first and second frames
+    imageSequence = crowdio.ImageSequence(sourceDir, recycleDir)
     frame, previousFrameTime, frameQueueLenght, currentFileName = \
-        getNextFrame(previousFrameTime)
+        imageSequence.getNextFrame(previousFrameTime)
     gotoNextFrame = 1
     if firstFrameTime <= 0.0:
         firstFrameTime = previousFrameTime
 
     trackingRegions = crowdmisc.constructTrackingRegions(frame)
     currTrackingRegions = crowdmisc.constructTrackingRegions(frame)
+    configWindowSize = (int(frame.shape[1]*configImageZoom),
+                        int(frame.shape[0]*configImageZoom))
 
     # Main Loop
     delayTime = 1;
@@ -241,7 +205,8 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
                 peoplePerStreetRegStr = peoplePerStreetRegStr[:-1]
 
             # 'Enter' pressed - save new number of people
-            if key == 10 and peoplePerStreetRegStr != "":
+            if key in(10, 13) and peoplePerStreetRegStr != "":
+                print "Density input successful"
                 crowdDensity = crowd.calculate_density(
                     int(peoplePerStreetRegStr), sampleRectDims)
                 numPeopleInSample = int(peoplePerStreetRegStr)
@@ -251,7 +216,7 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
             # Select mode
             if key == ord('p'):
                     processMode = "pause"
-            if key == ord('e') and crowdmisc.egomotion_correction == True:
+            if key == ord('e') and egomotion_correction == True:
                     processMode = "egomotion"
             if key == ord('a') and not trackingRegions['flowWarpMatrix'] is None:
                     processMode = "auto"
@@ -282,6 +247,8 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
 
         # Quit from main loop
         if key == ord('q'):
+            cv2.destroyAllWindows()
+            return velocities
             break
 
         # Check new corner point
@@ -298,7 +265,8 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
         ##################################
         # Get next frame
         if not processMode in ("pause", "egomotion") or gotoNextFrame > 0:
-            frame, tm, frameQueueLenght, currentFileName = getNextFrame(previousFrameTime)
+            frame, tm, frameQueueLenght, currentFileName = \
+                imageSequence.getNextFrame(previousFrameTime)
             if not frame is None:
                 currentFrameTime = tm
             gotoNextFrame -= 1
@@ -308,28 +276,26 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
                 firstFrameTime = currentFrameTime
 
             if rgbFrame is None:
-                rgbFrame = cv.CreateImage(cv.GetSize(frame), 8, 3)
+                rgbFrame = np.zeros(frame.shape+tuple([3]), dtype=np.uint8) 
     
             if currentFrame is None:
-                currentFrame = cv.CreateMat(frame.rows, frame.cols, frame.type)
+                currentFrame = np.zeros_like(frame)
             if previousFrame is None:
-                previousFrame = cv.CreateMat(frame.rows, frame.cols, frame.type)
+                previousFrame = np.zeros_like(frame)
     
-            if frame.channels == 1:
-                cv.CvtColor(frame, rgbFrame, cv.CV_GRAY2BGR)
+            if frame.squeeze().ndim == 2:
+                rgbFrame = cv2.cvtColor(frame, cv.CV_GRAY2BGR)
             else:
-                cv.Copy(frame, rgbFrame)
-    
-            cv.Copy(frame, currentFrame)
+                rgbFrame = frame.copy()
+                
+            currentFrame = frame.copy()
+            currentTrackedFrame = crowdmisc.TrackedFrame(frame)            
     
             ##################################
             # Draw corner configuration
-            if configWindowImage is None:
-                configWindowImage = cv.CreateMat(int(frame.rows*configImageZoom),
-                                                 int(frame.cols*configImageZoom),
-                                                 cv.CV_8UC3)
-    
-            cv.Resize(rgbFrame, configWindowImage)
+
+            configWindowImage = cv2.resize(rgbFrame,
+                                           configWindowSize)
 
         #end if (not frame is None)
 
@@ -341,7 +307,7 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
         ##################################
         # Prepare images for windows
         #cv.SetZero(densityWindowImage)
-        cv.SetZero(stateWindowImage)
+        stateWindowImage.fill(0)
         # cv.SetZero(statisticWindowImage)
 
         ###################################
@@ -358,20 +324,24 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
             if currentFrameTime > previousFrameTime:
                 # analyzing
                 currPeopleCount, prevFeatures, currFeatures, \
-                meanVelocity, velocityInlierIdx, currTrackingRegions = \
+                meanVelocity, velocityInlierIdx, \
+                currTrackingRegions,\
+                prevEgomotionMatrix, currEgomotionMatrix = \
                     crowd.compute_pedestrian_flow(
-                        previousFrame, currentFrame,
+                        previousTrackedFrame, currentTrackedFrame,
                         trackingRegions,
                         crowdDensity, currPeopleCount)
+                velocities.append((meanVelocity, currentFrameTime))
                 # draw statistic to 
                 statImage = draw.drawResult(
-                    currentFrame,
+                    currentTrackedFrame.getImage(),
                     prevFeatures, currFeatures,
                     meanVelocity, velocityInlierIdx,
                     crowdDensity, numPeopleInSample,
                     currPeopleCount,
-                    currentFrameTime, sampleRegionBounds, currTrackingRegions)
-                cv.Resize(statImage, statisticWindowImage)
+                    currentFrameTime, sampleRegionBounds, 
+                    trackingRegions, currTrackingRegions,
+                    prevEgomotionMatrix, currEgomotionMatrix)
                 saveStatImage(statImage, currentFrameTime)
                 sampleRegionBounds=None
 
@@ -381,8 +351,8 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
             draw.drawText(configWindowImage, "Press 'r' to reset street corners",
                           cv.RGB(255,255,0))
 
-        str = "Number of People: %d" % (crowdDensity)
-        draw.drawText(densityWindowImage, str, cv.RGB(0,255,0))
+        densityStr = "Number of People: %d" % (crowdDensity)
+        draw.drawText(densityWindowImage, densityStr, cv.RGB(0,255,0))
         draw.drawText(densityWindowImage, "Input number: " + peoplePerStreetRegStr, cv.RGB(0,255,0), 1)
 
         modeStr = "Current mode: '" + processMode + "'"
@@ -408,18 +378,19 @@ def main(sourceDir_, recycleDir_, statFileName_, waitKey = cv.WaitKey):
 
         ##################################
         # Update windows
-        cv.ShowImage(configWindow, configWindowImage)
-        cv.ShowImage(densityWindow, densityWindowImage )
-        cv.ShowImage(stateWindow, stateWindowImage )
-        cv.ShowImage(statisticWindow, statisticWindowImage)
+        cv2.imshow(configWindow, configWindowImage)
+        cv2.imshow(densityWindow, densityWindowImage )
+        cv2.imshow(stateWindow, stateWindowImage )
+        cv2.imshow(statisticWindow, statisticWindowImage)
 
         # Save current file
         if not processMode in ("pause", "egomotion") or currentFrameTime != previousFrameTime:
             frm = previousFrame
             previousFrame = currentFrame
+            previousTrackedFrame = currentTrackedFrame
             currentFrame = frm 
             previousFrameTime = currentFrameTime
-            markFrames(currentFrameTime)
+            imageSequence.moveProcessedFrames(currentFrameTime)
             logState(currentFileName, currentFrameTime, crowdDensity, currPeopleCount)
 
 # MAIN

@@ -6,12 +6,13 @@ Created on Wed Feb  8 21:15:49 2012
 """
 import time
 
-import cv
 import numpy as np
+import cv
+import cv2
 
 import cvutils
 from cvutils import array2point_list
-from crowdmisc import mode
+from crowdmisc import Properties
 
 SmallTextFont = None
 LargeTextFont = None
@@ -19,24 +20,39 @@ def drawText(image, text, color, rowNumber = 0):
     global SmallTextFont
     global LargeTextFont
     
-    if(image.width > 900):
+    if(image.shape[1] > 900):
         TextFont = LargeTextFont
         if TextFont is None:
-            TextFont = cv.InitFont(cv.CV_FONT_HERSHEY_COMPLEX, 1.1, 1.1)
+            TextFont = cv2.FONT_HERSHEY_COMPLEX
             rowHeight = 55
     else:
         TextFont = SmallTextFont
         if TextFont is None:
-            TextFont = cv.InitFont(cv.CV_FONT_HERSHEY_COMPLEX_SMALL, 1, 1)
+            TextFont = cv2.FONT_HERSHEY_COMPLEX_SMALL
             rowHeight = 25
         # Ubuntu-Mono-R /usr/share/fonts/truetype
         #TextFont = ImageFont.truetype('/tmp/font.ttf', 25)
-    cv.PutText(image, text, (0, rowHeight * (rowNumber + 1)), TextFont, color)
+    cv2.putText(image, text, (0, rowHeight * (rowNumber + 1)),
+               TextFont, 1, color)
     
-def drawPoints(image, points, color = cv.RGB(255,0,0)):
+def drawPoints(image, points, color = cv.RGB(255, 0, 0)):
+    if(image.squeeze().ndim == 2):
+        image = np.tile(image[:, :, np.newaxis], (1,1,3))
+    points = cvutils.array2point_list(points)
     for p in points:
-        cv.Circle(image, (int(p[0]), int(p[1])), 1, color, 3)
-    #print "Drew {:d} points in color".format(len(points)) + str(color)
+        cv2.circle(image, (int(p[0]), int(p[1])), 3, color, 1)
+    return image
+
+def drawLines(image, points1, points2, color = (0, 0, 0)):
+    if(image.squeeze().ndim == 2):
+        image = np.tile(image[:, :, np.newaxis], (1,1,3))
+    points1 = cvutils.array2point_list(points1)
+    points2 = cvutils.array2point_list(points2)
+    # TODO:  handle exception if different size
+    for p1, p2 in zip(points1, points2):
+        cv2.line(image, p1, p2, color, thickness=1, lineType=4)
+    
+    return image
 
 def draw_vertical_sample_boundaries(
     curr_image_cv, warp_matrix, square_length):
@@ -77,8 +93,7 @@ def draw_vertical_sample_boundaries(
             np.array(full_line1 + full_line2))
 
 def backproject_sample_rect(warp_matrix, sample_dims):
-    warp_matrix_inv = cv.CreateMat(3,3, cv.CV_32FC1)
-    cv.Invert(warp_matrix, warp_matrix_inv)
+    warp_matrix_inv = cv2.invert(warp_matrix)[1]
     #warp_matrix_inv = np.array(warp_matrix_inv)/cv.Get2D(warp_matrix_inv, 2, 2)[0]
     #print warp_matrix_inv
     warp_matrix_inv = cv.fromarray(warp_matrix_inv)
@@ -109,8 +124,8 @@ def compute_sample_image_coordinates(image_shape, sample_bounds):
     # Also, if the sample is not a square, we may amplify the differences by
     # the neighborhood, unnaturally.  Include a maximum number of pixels as
     # a function of screen resolution
-    neighborhood_size_coeff = 1
-
+    neighborhood_size_coeff=Properties.neighborhood_size_coeff
+    
     sample_roi = cv.BoundingRect(sample_bounds, 0)
     neighborhood_roi = (sample_roi[0] - neighborhood_size_coeff * sample_roi[2],
                         sample_roi[1] - neighborhood_size_coeff * sample_roi[3],
@@ -146,15 +161,14 @@ def draw_backprojected_sample_rect( \
     if sample_image.ndim == 2:
         sample_image = sample_image[:, :, np.newaxis]
         sample_image = np.tile(sample_image, (1,1,3))
-    sample_image = cv.fromarray(sample_image)
     
-    cv.PolyLine(sample_image, [local_sample_shape], True, cv.RGB(255, 0, 0))
+    cv2.polylines(sample_image, np.array([local_sample_shape]), True, cv.RGB(255, 0, 0))
 
     return sample_image, sample_rect
 
 def draw_sample_region(
         curr_image_cv, warp_matrix, square_length):
-    global mode
+    mode = Properties.mode
     if mode == 'velo':
         return draw_vertical_sample_boundaries(
             curr_image_cv, warp_matrix, square_length)
@@ -169,26 +183,35 @@ def drawResult(currentFrame,
                numInImage, numInSample,
                numTotal,
                frameTime, 
-               sampleRegionBounds, trackingRegions):
+               sampleRegionBounds, 
+               baseTrackingRegions, trackingRegions,
+               prevEgomotionMatrix, currEgomotionMatrix):
     global statImage
     if statImage is None:
-         statImage = cv.CreateMat(int(currentFrame.rows),
-                                  int(currentFrame.cols),
-                                  cv.CV_8UC3)
+         statImage = np.zeros(currentFrame.shape+tuple([3]),
+                              dtype = np.uint8)
 
-    if currentFrame.channels == 1:
-        cv.CvtColor(currentFrame, statImage, cv.CV_GRAY2BGR)
+    # Warp everything to base
+    prevEgomotionMatrix = np.linalg.inv(prevEgomotionMatrix)
+    currEgomotionMatrix = np.linalg.inv(currEgomotionMatrix)
+    currentFrame = cv2.warpPerspective(currentFrame, currEgomotionMatrix,
+                                       currentFrame.shape[1::-1])
+    prevFeatures = cv2.perspectiveTransform(prevFeatures, prevEgomotionMatrix)
+    currFeatures = cv2.perspectiveTransform(currFeatures, currEgomotionMatrix)
+    
+    if currentFrame.squeeze().ndim == 2:
+        statImage = cv2.cvtColor(currentFrame, cv2.COLOR_GRAY2BGR)
     else:
-        cv.CopyImage(currentFrame, statImage)
+        statImage = currentFrame.copy()
         
-    prevFeaturesNP = np.array(prevFeatures)
-    currFeaturesNP = np.array(currFeatures)
-    prevInlierFeatures = prevFeaturesNP[:, velocityInlierIdx, :]
-    currInlierFeatures = currFeaturesNP[:, velocityInlierIdx, :]
+    prevFeaturesNP = np.atleast_2d(prevFeatures).reshape(1, -1, 2)
+    currFeaturesNP = np.atleast_2d(currFeatures).reshape(1, -1, 2)
+    prevInlierFeatures = prevFeaturesNP.take(velocityInlierIdx, 1)
+    currInlierFeatures = currFeaturesNP.take(velocityInlierIdx, 1)
     velocityOutlierIdx = np.setdiff1d(np.arange(prevFeaturesNP.shape[1]),
                                       velocityInlierIdx)
-    prevOutlierFeatures = prevFeaturesNP[:, velocityOutlierIdx,:]
-    currOutlierFeatures = currFeaturesNP[:, velocityOutlierIdx,:]
+    prevOutlierFeatures = prevFeaturesNP.take(velocityOutlierIdx, 1)
+    currOutlierFeatures = currFeaturesNP.take(velocityOutlierIdx, 1)
 
     drawText(statImage, "Time " + time.strftime("%Y.%m.%d %H:%M:%S", time.localtime(frameTime) ), cv.RGB(255, 255, 0), 1)
     drawText(statImage, "Total Seen: %d" % (numTotal), cv.RGB(255, 255, 0), 2)
@@ -203,16 +226,19 @@ def drawResult(currentFrame,
     drawPoints(statImage, array2point_list(currInlierFeatures), cv.RGB(0, 255, 0))
     drawPoints(statImage, array2point_list(currOutlierFeatures), cv.RGB(255, 255, 0))
     drawPoints(statImage, array2point_list(prevOutlierFeatures), cv.RGB(255, 128, 0))
+    drawLines(statImage, prevInlierFeatures, currInlierFeatures, (0, 0, 0))
     
     # bound height
-    flowCorners = trackingRegions['flowCorners']
-    stableCorners = trackingRegions['stableCorners']
-    cv.Line(statImage, flowCorners[3], flowCorners[0], cv.CV_RGB(255, 0, 0))
+    flowCorners = baseTrackingRegions['flowCorners']
+    stableCorners = baseTrackingRegions['stableCorners']
+    cv2.line(statImage, flowCorners[3], flowCorners[0], cv.CV_RGB(255, 0, 0))
     if sampleRegionBounds != None:
-        cv.PolyLine(statImage, [sampleRegionBounds],
+        cv2.polylines(statImage, np.array([sampleRegionBounds]),
                     True, cv.RGB(0, 255, 0))
     # draw the stable regions
     stablePolyLines = zip(*[stableCorners[i::4] for i in range(4)])
-    cv.PolyLine(statImage, [list(x) for x in stablePolyLines],
+    stablePolyLines = np.array([list(x) for x in stablePolyLines], 
+                                dtype = np.int32)
+    cv2.polylines(statImage, stablePolyLines,
                 True, cv.RGB(0,  0, 255))
     return statImage

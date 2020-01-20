@@ -5,25 +5,26 @@ Created on Tue Jun 19 10:02:53 2012
 @author: anatoliy
 """
 
-import cv
 import numpy as np
 
 import unittest
 import numpy.testing as npt
 
-import crowd
 import crowdmisc
+import crowdio
 import draw
 
-from crowdmisc import mode
+from crowdmisc import Properties
 
 class TestTrackingRegions(unittest.TestCase):
     def setUp(self):
-        crowdmisc.mode = 'top'
-                
+        Properties.mode = 'top'
+        Properties.neighborhood_size_coeff = 1.5
+        Properties.dimension_of_motion = 1
+        Properties.min_velocity_in_pixels = 1
+
     def test_updateFlowTrackingRegion(self):
-        mask = cv.CreateMat(10, 10, cv.CV_8UC1)
-        cv.SetZero(mask)
+        mask = np.zeros((10, 10), dtype = np.uint8)
         trackingRegions = crowdmisc.constructTrackingRegions(mask)
         trackingRegions['flowMask'] = mask
         
@@ -42,8 +43,7 @@ class TestTrackingRegions(unittest.TestCase):
         self.assertEqual(trackingRegions['displayFlowCorners'], [(2,2)])
         
     def test_updateEgomotionTrackingRegion(self):
-        mask = cv.CreateMat(20, 10, cv.CV_8UC1)
-        cv.SetZero(mask)
+        mask = np.zeros((20, 10), dtype = np.uint8)
         trackingRegions = crowdmisc.constructTrackingRegions(mask)
         
         crowdmisc.updateEgomotionTrackingRegion([(2,1), (2,3)], 0.5, trackingRegions)
@@ -70,8 +70,7 @@ class TestTrackingRegions(unittest.TestCase):
         npt.assert_equal(trackingRegions['stableRegionMask'], trueMask)
         
     def test_warpTrackingRegion(self):
-        mask = cv.CreateMat(10, 10, cv.CV_8UC1)
-        cv.SetZero(mask)
+        mask = np.zeros((10, 10), dtype = np.uint8)
         trackingRegions = crowdmisc.constructTrackingRegions(mask)
         crowdmisc.updateEgomotionTrackingRegion([(2,3), (2,1), (3,1), (3,3)],
                                                  0.5, trackingRegions)
@@ -80,7 +79,6 @@ class TestTrackingRegions(unittest.TestCase):
         warp_matrix = np.eye(3)
         warp_matrix[0, 2] = 2
         warp_matrix[1, 2] = -1
-        warp_matrix = cv.fromarray(warp_matrix)
         
         out = crowdmisc.warpTrackingRegions(trackingRegions, mask, warp_matrix)
         self.assertListEqual(out['flowCorners'], [(6, 5), (6, 1), (8, 1), (8,5)])
@@ -106,11 +104,12 @@ class TestTrackingRegions(unittest.TestCase):
         npt.assert_equal(out['flowMask'], true_mask)
         npt.assert_equal(out['stableRegionMask'], true_mask)
         
-        true_scaling = np.eye(3, dtype = np.float32)
+        true_scaling = np.eye(3)
         true_scaling[(0, 1), (0, 1)] = [0.5, 0.25]
-        true_shift = np.eye(3, dtype = np.float32)
+        true_shift = np.eye(3)
         true_shift[(0, 1), (2,2)] = [-3, -0.25]
-        npt.assert_equal(out['flowWarpMatrix'], np.dot(true_shift, true_scaling))
+        npt.assert_almost_equal(out['flowWarpMatrix'], np.dot(true_shift, true_scaling))
+        self.assertAlmostEqual(out['minVelocity'], 0.25)
 
 class TestTransformations(unittest.TestCase):
     def testCompute_unit_square_transform(self):
@@ -118,22 +117,22 @@ class TestTransformations(unittest.TestCase):
         mat = np.eye(3)
         mat[0, 0] = mat[1,1] = 0.5
         out = crowdmisc.computeUnitSquareTransform(pts)
-        out = np.array(out)
+        #out = np.array(out)
         npt.assert_almost_equal(mat, out)
 
     def testBackproject_sample_rect(self):
         # create a warp matrix for a 10 x 20 square with an offset of (15, 25)
-        warp_matrix = cv.fromarray(np.array([[0.1, 0, -1.5],
-                                             [0, 0.05, -1.25],
-                                             [0,0,1]], np.float32))
+        warp_matrix = np.array([[0.1, 0, -1.4449],
+                               [0, 0.05, -1.24440],
+                               [0,0,1]], np.float32)
         sample_region = draw.backproject_sample_rect(warp_matrix, (0.5, 0.5))
         self.assertListEqual(
             sample_region,
-            [(18, 40), (18,30), (22, 30), (22, 40)])
+            [(17, 40), (17,30), (22, 30), (22, 40)])
         sample_region = draw.backproject_sample_rect(warp_matrix, (0.5, 0.25))
         self.assertListEqual(
             sample_region,
-            [(18, 37), (18,32), (22, 32), (22, 37)])
+            [(17, 37), (17,32), (22, 32), (22, 37)])
     
     def testCompute_sample_image_coordinates(self):
 
@@ -152,5 +151,48 @@ class TestTransformations(unittest.TestCase):
                          (0, 0, 57.5, 65.0))
         self.assertListEqual(local_sample_bounds,
                              [(25, 25), (15, 15), (5, 25), (15, 34)])
+class TestIO(unittest.TestCase):
+    def setUp(self):
+        self.imageSequence = crowdio.ImageSequence("", "")
+    def testGetFileTime(self):
+        filename = 'DSC_1234.jpg'
+        time = self.imageSequence.getFileTime(filename)
+        self.assertEquals(1234, time)
+        filename = '0000543220.bmp'
+        time = self.imageSequence.getFileTime(filename)
+        self.assertEquals(543220, time)
+        filename = 'file55432.123.JPG'
+        time = self.imageSequence.getFileTime(filename)
+        self.assertAlmostEquals(55432.123, time)
+    
+    def testFindProcessedFrames(self):
+        fileList =['ds1.jpg', 'ds2.jpg', 'ds3.jpg', 'ds4.jpg', 'ds5.jpg']
+        processedFrames = self.imageSequence.findProcessedFrames(3, fileList)
+        self.assertListEqual(processedFrames,
+                             ['ds1.jpg', 'ds2.jpg', 'ds3.jpg'])
+        
+        
+class TestTrackingImage(unittest.TestCase):
+    def testGetTrackingFeatures(self):
+        image = np.zeros((20, 20), dtype = np.uint8)
+        def testGoodFeaturesToTrack(*arglist):
+            features = np.array([[10, 12],
+                                 [3, 4],
+                                 [9, 8],
+                                 [18, 14]]).reshape(-1, 1, 2)
+            return features
+        
+        mask = np.zeros_like(image)
+        mask[4:15, 8:13] = 1
+        trackedFrame = crowdmisc.TrackedFrame(
+            image, goodFeaturesToTrack=testGoodFeaturesToTrack)
+        features = trackedFrame.getTrackingFeatures(4, mask)
+        npt.assert_array_equal(features, 
+                               np.array([[10, 12], [9, 8]]).reshape((2, 1, 2)))
+        mask = np.zeros_like(mask)
+        features = trackedFrame.getTrackingFeatures(4, mask)
+        self.assertFalse(features)
+        
+
 if __name__ == '__main__':
     unittest.main()

@@ -9,7 +9,8 @@ import scipy.linalg as linalg
 import cv
 
 def array2point_list(points_array):
-    points_array = points_array.reshape(-1, 2)
+    if type(points_array) is np.ndarray:
+        points_array = points_array.reshape(-1, 2)
     points = []
     for point in points_array:
         points.append(tuple(np.round(point).astype(np.int32)))
